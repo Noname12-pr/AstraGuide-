@@ -7,7 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from openai import AsyncOpenAI
 
-# Отримуємо токени зі змінних оточення Railway
+# Берем токены из Railway
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -19,85 +19,103 @@ class OrderFlow(StatesGroup):
     waiting_for_payment = State()
     waiting_for_question = State()
 
-# Дані про всі ваші послуги
+# Полный список ваших услуг
 SERVICES = {
-    "🃏 ТАРО": {
-        "3 карти (швидке)": {"price": 500, "link": "https://t.me/tribute/app?startapp=pqgo", "prompt": "Розклад на 3 карти: минуле, теперішнє, майбутнє."},
-        "5 карт (порада)": {"price": 700, "link": "https://t.me/tribute/app?startapp=pqgq", "prompt": "Розклад на 5 карт: ситуація та порада."},
-        "8 карт (глибоко)": {"price": 1000, "link": "https://t.me/tribute/app?startapp=pqgr", "prompt": "Глибокий розбір на 8 карт."},
+    "🃏 ТАРО (основа)": {
+        "Таро — 3 карты": {"price": 500, "link": "https://t.me/tribute/app?startapp=pqgo"},
+        "Таро — 5 карт": {"price": 700, "link": "https://t.me/tribute/app?startapp=pqgq"},
+        "Таро — 8 карт": {"price": 1000, "link": "https://t.me/tribute/app?startapp=pqgr"},
     },
-    "🔮 ОРАКУЛ": {
-        "Краткий ответ": {"price": 500, "link": "https://t.me/tribute/app?startapp=pqgw", "prompt": "Коротка містична відповідь Оракула."},
+    "❤️ ОТНОШЕНИЯ": {
+        "Что он(а) чувствует": {"price": 600, "link": "https://t.me/tribute/app?startapp=pqgz"},
+        "Развитие отношений": {"price": 800, "link": "https://t.me/tribute/app?startapp=pqgB"},
     },
     "❓ ДА / НЕТ": {
-        "Відповідь (1 питання)": {"price": 300, "link": "https://t.me/tribute/app?startapp=pqgD", "prompt": "Чітка відповідь ТАК або НІ з коротким поясненням."},
+        "Ответ Да/Нет": {"price": 300, "link": "https://t.me/tribute/app?startapp=pqgD"},
+        "Да/Нет с пояснением": {"price": 600, "link": "https://t.me/tribute/app?startapp=pqgF"},
     }
 }
 
-# --- Навігація ---
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+# --- Кнопки главного меню ---
+def get_main_menu():
     builder = InlineKeyboardBuilder()
     for cat in SERVICES.keys():
         builder.button(text=cat, callback_data=f"cat_{cat}")
     builder.adjust(1)
-    await message.answer("🔮 Вітаю! Я ваш цифровий оракул. Оберіть категорію послуг:", reply_markup=builder.as_markup())
+    return builder.as_markup()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "🔮 **Добро пожаловать в мир предсказаний.**\n\nВыберите категорию услуг, чтобы начать расклад:",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def choose_sub(callback: types.CallbackQuery):
     cat = callback.data.split("_")[1]
     builder = InlineKeyboardBuilder()
     for sub in SERVICES[cat]:
-        builder.button(text=f"{sub} - {SERVICES[cat][sub]['price']}₽", callback_data=f"svc_{cat}_{sub}")
+        builder.button(text=f"{sub} — {SERVICES[cat][sub]['price']}₽", callback_data=f"svc_{cat}_{sub}")
     builder.button(text="⬅️ Назад", callback_data="back_home")
     builder.adjust(1)
-    await callback.message.edit_text(f"Оберіть розклад ({cat}):", reply_markup=builder.as_markup())
+    await callback.message.edit_text(f"📍 Категория: {cat}\nВыберите конкретную услугу:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "back_home")
 async def back_home(callback: types.CallbackQuery):
-    await cmd_start(callback.message)
+    await callback.message.edit_text("Выберите категорию услуг:", reply_markup=get_main_menu())
 
 @dp.callback_query(F.data.startswith("svc_"))
 async def process_selection(callback: types.CallbackQuery, state: FSMContext):
-    _, cat, svc = callback.data.split("_")
+    parts = callback.data.split("_")
+    cat, svc = parts[1], parts[2]
     data = SERVICES[cat][svc]
     
-    await state.update_data(current_svc=svc, system_prompt=data['prompt'])
+    await state.update_data(current_svc=svc)
     
     builder = InlineKeyboardBuilder()
-    builder.button(text="💰 Оплатити", url=data['link'])
-    builder.button(text="✅ Я оплатив", callback_data="check_pay")
+    builder.button(text="💳 Оплатить через Tribute", url=data['link'])
+    builder.button(text="✅ Я оплатил", callback_data="check_pay")
     builder.adjust(1)
     
     await callback.message.edit_text(
-        f"Ви обрали: **{svc}**\nЦіна: **{data['price']}₽**\n\nБудь ласка, здійсніть оплату через Tribute і натисніть кнопку нижче.",
+        f"✨ Вы выбрали: **{svc}**\n💰 К оплате: **{data['price']}₽**\n\n"
+        "1. Нажмите кнопку 'Оплатить'.\n"
+        "2. После подтверждения платежа вернитесь сюда и нажмите 'Я оплатил'.",
         reply_markup=builder.as_markup(),
         parse_mode="Markdown"
     )
     await state.set_state(OrderFlow.waiting_for_payment)
 
-@dp.callback_query(F.data == "check_pay")
+@dp.callback_query(F.data == "check_pay", OrderFlow.waiting_for_payment)
 async def ask_question(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Чудово! Гроші отримано. Тепер напишіть ваше питання для розкладу:")
+    # В идеале здесь должна быть проверка через Tribute API. 
+    # Пока оставляем на подтверждении пользователем.
+    await callback.message.answer("💎 Оплата подтверждена! Теперь введите ваш вопрос для ChatGPT (Оракула):")
     await state.set_state(OrderFlow.waiting_for_question)
 
 @dp.message(OrderFlow.waiting_for_question)
 async def ai_reading(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
-    msg = await message.answer("🔮 Зв'язуюсь із всесвітом... Карти розкладаються...")
+    service_name = user_data.get('current_svc', 'Расклад Таро')
+    
+    status_msg = await message.answer("🔮 *Карты открываются... Силы Вселенной готовят ответ...*", parse_mode="Markdown")
     
     try:
-        response = await client.chat.completions.create(
+        # Запрос к ChatGPT
+        completion = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": f"Ти — професійний таролог. Твоє завдання: {user_data['system_prompt']}. Будь містичним, але давай точні відповіді."},
-                {"role": "user", "content": message.text}
+                {"role": "system", "content": "Ты профессиональный таролог и мистик. Давай подробные, точные и глубокие ответы на русском языке."},
+                {"role": "user", "content": f"Услуга: {service_name}. Вопрос клиента: {message.text}"}
             ]
         )
-        await msg.edit_text(response.choices[0].message.content)
+        answer = completion.choices[0].message.content
+        await status_msg.edit_text(f"📜 **Ваше предсказание ({service_name}):**\n\n{answer}", parse_mode="Markdown")
     except Exception as e:
-        await msg.edit_text("❌ Виникла помилка при генерації. Зверніться до підтримки.")
+        print(f"Ошибка OpenAI: {e}")
+        await status_msg.edit_text("❌ Произошла ошибка при связи с Оракулом. Попробуйте позже или напишите администратору.")
     
     await state.clear()
 
