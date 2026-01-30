@@ -28,7 +28,7 @@ class OrderFlow(StatesGroup):
 # Список послуг (назви та посилання)
 SERVICES = {
     "🃏 ТАРО (основа)": {
-        "Таро — 3 карты": "https://t.me/tribute/app?startapp=pqgo",
+        "Таро — 3 карты": "https://t.me/tribute/app?startapp=pqoQ",
         "Таро — 5 карт": "https://t.me/tribute/app?startapp=pqgq",
         "Таро — 8 карт": "https://t.me/tribute/app?startapp=pqgr",
     },
@@ -153,3 +153,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
