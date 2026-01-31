@@ -8,34 +8,35 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
-from openai import AsyncOpenAI
+import google.generativeai as genai
 
-# Налаштування з Railway
+# --- НАСТРОЙКИ ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 TRIBUTE_SECRET = os.getenv("TRIBUTE_SECRET")
 PORT = int(os.getenv("PORT", 8080))
 
+# Настройка Gemini (меня)
+genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-client = AsyncOpenAI(api_key=OPENAI_KEY)
 
 class OrderFlow(StatesGroup):
     waiting_for_payment = State()
     waiting_for_question = State()
 
-# Словник усіх послуг
+# Справочник услуг
 SERVICES_MAP = {
     "pqgo": "Таро — 3 карты",
     "pqgq": "Таро — 5 карт",
     "pqgr": "Таро — 8 карт",
     "pqgu": "Таро — расклад на отношения",
-    "pqgw": "Оракул — краткий ответ",
-    "pqgD": "Ответ Да / Нет",
-    "free_test": "Бесплатная проверка"
+    "free_test": "Бесплатная проверка (Тест системы)"
 }
 
-# --- ВЕБХУК ДЛЯ АВТО-ОПЛАТИ ---
+# --- WEBHOOK ДЛЯ TRIBUTE ---
 async def handle_tribute_webhook(request):
     try:
         signature = request.headers.get("X-Tribute-Signature")
@@ -56,82 +57,87 @@ async def handle_tribute_webhook(request):
                 await user_state.update_data(current_svc=SERVICES_MAP.get(svc_code, "Расклад"))
                 await user_state.set_state(OrderFlow.waiting_for_question)
                 
-                await bot.send_message(user_id, "✅ **Оплата подтверждена!**\nОракул готов. Введите ваш вопрос:")
+                await bot.send_message(user_id, "✅ **Оплата подтверждена!**\n\nЯ чувствую вашу энергию. Введите ваш вопрос Оракулу:")
         return web.Response(text="ok")
     except:
         return web.Response(status=500)
 
-# --- ЛОГІКА БОТА ---
+# --- ЛОГИКА БОТА ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state == OrderFlow.waiting_for_question:
-        await message.answer("🔮 Оракул на связи. Жду ваш вопрос:")
+    # Если юзер вернулся после оплаты
+    if await state.get_state() == OrderFlow.waiting_for_question:
+        await message.answer("🔮 Оракул готов. Жду ваш вопрос:")
         return
 
     builder = InlineKeyboardBuilder()
-    # БЕЗКОШТОВНА КНОПКА ДЛЯ ПЕРЕВІРКИ
-    builder.button(text="🎁 Проверить Оракула (Бесплатно)", callback_data="free_test")
-    builder.button(text="🃏 ТАРО (Платные расклады)", callback_data="cat_taro")
+    builder.button(text="🎁 Проверить Оракула (Бесплатно)", callback_data="test_me")
+    builder.button(text="🃏 Платные расклады Таро", callback_data="cat_taro")
     builder.adjust(1)
-    await message.answer("🔮 **Добро пожаловать к Оракулу.**\n\nВы можете проверить мои силы бесплатно или выбрать глубокий расклад:", reply_markup=builder.as_markup())
+    
+    await message.answer(
+        "🔮 **Добро пожаловать в обитель Оракула.**\n\n"
+        "Вы можете проверить мою связь с миром духов бесплатно или выбрать глубокий платный расклад.",
+        reply_markup=builder.as_markup()
+    )
 
-# Обробка безкоштовної перевірки
-@dp.callback_query(F.data == "free_test")
-async def free_test(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(current_svc="Бесплатная проверка (Таро 3 карты)")
+# Кнопка бесплатной проверки
+@dp.callback_query(F.data == "test_me")
+async def test_me(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(current_svc="Бесплатный тест")
     await state.set_state(OrderFlow.waiting_for_question)
-    await callback.message.edit_text("✨ **Тестовый режим активирован.**\n\nЗадайте свой вопрос Оракулу (бесплатно):")
+    await callback.message.edit_text("✨ **Тестовый режим включен.**\n\nЗадай мне любой вопрос, и я отвечу как Оракул (бесплатно):")
 
-# Обробка вибору платної категорії Таро
 @dp.callback_query(F.data == "cat_taro")
 async def cat_taro(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
-    builder.button(text="3 карты (500 ₽)", callback_data="buy_pqgo")
-    builder.button(text="8 карт (1000 ₽)", callback_data="buy_pqgr")
+    builder.button(text="3 карты (500 ₽)", callback_data="pay_pqgo")
+    builder.button(text="Отношения (900 ₽)", callback_data="pay_pqgu")
     builder.button(text="⬅️ Назад", callback_data="back")
     builder.adjust(1)
-    await callback.message.edit_text("🔮 **Выберите платный расклад:**", reply_markup=builder.as_markup())
+    await callback.message.edit_text("✨ **Выберите расклад:**", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "back")
 async def back(callback: types.CallbackQuery, state: FSMContext):
     await cmd_start(callback.message, state)
 
-@dp.callback_query(F.data.startswith("buy_"))
-async def process_buy(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.startswith("pay_"))
+async def process_pay(callback: types.CallbackQuery, state: FSMContext):
     svc_code = callback.data.split("_")[1]
     user_id = callback.from_user.id
     pay_url = f"https://t.me/tribute/app?startapp={svc_code}&custom_data={user_id}:{svc_code}"
     
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Оплатить", url=pay_url)
-    await callback.message.edit_text("✨ После оплаты Оракул сразу примет ваш вопрос.", reply_markup=builder.as_markup())
+    await callback.message.edit_text("✨ После оплаты я сразу приму ваш вопрос.", reply_markup=builder.as_markup())
     await state.set_state(OrderFlow.waiting_for_payment)
 
-# ВІДПОВІДЬ CHATGPT (ОРАКУЛА)
+# --- ОТВЕТ GEMINI ---
 @dp.message(OrderFlow.waiting_for_question)
 async def oracle_answer(message: types.Message, state: FSMContext):
     data = await state.get_data()
     svc = data.get("current_svc", "Расклад")
     
-    status = await message.answer("🔮 *Оракул входит в транс...*")
+    status = await message.answer("🔮 *Оракул входит в транс... Собираю знаки...*")
     
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Ты — древний мудрый Оракул. Твои ответы глубокие, мистические и загадочные. Не упоминай, что ты ИИ. Отвечай на русском."},
-                {"role": "user", "content": f"Услуга: {svc}. Вопрос клиента: {message.text}"}
-            ]
+        # Промпт для меня
+        prompt = (
+            f"Ты — мудрый и загадочный Оракул. Твои ответы пропитаны мистикой, но несут смысл. "
+            f"Используй красивые метафоры. Отвечай на русском языке. "
+            f"Услуга: {svc}. Вопрос клиента: {message.text}"
         )
-        await status.edit_text(f"📜 **Послание Оракула:**\n\n{response.choices[0].message.content}")
+        
+        response = model.generate_content(prompt)
+        await status.edit_text(f"📜 **Послание Оракула:**\n\n{response.text}")
     except Exception as e:
-        await status.edit_text("🌑 Связь с миром духов прервана. Попробуйте еще раз.")
+        print(f"Ошибка Gemini: {e}")
+        await status.edit_text("🌑 Эфир затуманен. Попробуйте еще раз через минуту.")
     
     await state.clear()
 
-# ЗАПУСК
+# --- ЗАПУСК СЕРВЕРА ---
 async def main():
     asyncio.create_task(dp.start_polling(bot))
     app = web.Application()
