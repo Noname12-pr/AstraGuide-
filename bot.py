@@ -2,7 +2,6 @@ import os
 import asyncio
 import hmac
 import hashlib
-import json
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -11,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 from openai import AsyncOpenAI
 
-# Налаштування зі змінних оточення Railway
+# Читання налаштувань з Railway
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 TRIBUTE_SECRET = os.getenv("TRIBUTE_SECRET")
@@ -25,20 +24,14 @@ class OrderFlow(StatesGroup):
     waiting_for_payment = State()
     waiting_for_question = State()
 
-# Список послуг (назви та посилання)
-SERVICES = {
-    "🃏 ТАРО (основа)": {
-        "Таро — 3 карты": "https://t.me/tribute/app?startapp=pqoQ",
-        "Таро — 5 карт": "https://t.me/tribute/app?startapp=pqgq",
-        "Таро — 8 карт": "https://t.me/tribute/app?startapp=pqgr",
-    },
-    "❤️ ОТНОШЕНИЯ": {
-        "Что он(а) чувствует": "https://t.me/tribute/app?startapp=pqgz",
-        "Развитие отношений": "https://t.me/tribute/app?startapp=pqgB",
-    },
-    "🔮 ОРАКУЛ": {
-        "Оракул — ответ": "https://t.me/tribute/app?startapp=pqgw",
-    }
+# Словник послуг (Код з Tribute : Назва для Оракула)
+SERVICES_MAP = {
+    "pqgo": "Таро — 3 карты",
+    "pqgq": "Таро — 5 карт",
+    "pqgr": "Таро — 8 карт",
+    "pqgu": "Таро — отношения",
+    "pqgw": "Оракул — ответ",
+    "pqgD": "Ответ Да / Нет"
 }
 
 # --- ОБРОБНИК ВЕБХУКА (АВТОМАТИЧНА ОПЛАТА) ---
@@ -47,110 +40,107 @@ async def handle_tribute_webhook(request):
         signature = request.headers.get("X-Tribute-Signature")
         body = await request.read()
         
-        # Перевірка безпеки (підпису)
+        # Перевірка безпеки
         hash_check = hmac.new(TRIBUTE_SECRET.encode(), body, hashlib.sha256).hexdigest()
         if hash_check != signature:
             return web.Response(status=403)
 
         data = await request.json()
-        # Перевіряємо, чи оплата успішна
         if data.get("status") == "completed":
-            # Отримуємо ID користувача з custom_data
-            user_id = int(data.get("custom_data"))
-            
-            # Змінюємо стан користувача на очікування питання
-            user_state = dp.fsm.resolve_context(bot, user_id, user_id)
-            await user_state.set_state(OrderFlow.waiting_for_question)
-            
-            await bot.send_message(
-                user_id, 
-                "✅ **Оплата получена!**\n\nОракул готов ответить на ваш запрос. Пожалуйста, напишите ваш вопрос прямо здесь:"
-            )
+            payload = data.get("custom_data", "")
+            if ":" in payload:
+                user_id, svc_code = payload.split(":")
+                user_id = int(user_id)
+                
+                user_state = dp.fsm.resolve_context(bot, user_id, user_id)
+                await user_state.update_data(current_svc=SERVICES_MAP.get(svc_code, "Расклад"))
+                await user_state.set_state(OrderFlow.waiting_for_question)
+                
+                await bot.send_message(
+                    user_id, 
+                    "✅ **Оплата подтверждена!**\n\nОракул готов. Пожалуйста, введите ваш вопрос:"
+                )
         return web.Response(text="ok")
-    except Exception as e:
-        print(f"Webhook error: {e}")
+    except Exception:
         return web.Response(status=500)
 
-# --- ЛОГІКА ТЕЛЕГРАМ БОТА ---
+# --- ЛОГІКА БОТА ---
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    for cat in SERVICES.keys():
-        builder.button(text=cat, callback_data=f"cat_{cat}")
-    builder.adjust(1)
-    await message.answer("🔮 **Добро пожаловать к Оракулу.**\nВыберите категорию для расклада:", reply_markup=builder.as_markup())
+async def cmd_start(message: types.Message, state: FSMContext):
+    # Перевірка, чи не повернувся юзер після оплати
+    current_state = await state.get_state()
+    if current_state == OrderFlow.waiting_for_question:
+        await message.answer("🔮 С возвращением! Оплата получена. Напишите ваш вопрос:")
+        return
 
-@dp.callback_query(F.data.startswith("cat_"))
-async def choose_sub(callback: types.CallbackQuery):
-    cat = callback.data.split("_")[1]
     builder = InlineKeyboardBuilder()
-    for sub, link in SERVICES[cat].items():
-        builder.button(text=sub, callback_data=f"svc_{cat}_{sub}")
+    builder.button(text="🃏 ТАРО", callback_data="cat_taro")
+    builder.button(text="🔮 ОРАКУЛ", callback_data="cat_ora")
+    builder.adjust(1)
+    await message.answer("🔮 **Добро пожаловать к Оракулу.**\nВыберите категорию:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "cat_taro")
+async def cat_taro(callback: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    # Приклад кнопок (заміни коди на свої)
+    builder.button(text="3 карты (500 ₽)", callback_data="buy_pqgo")
+    builder.button(text="8 карт (1000 ₽)", callback_data="buy_pqgr")
     builder.button(text="⬅️ Назад", callback_data="back")
     builder.adjust(1)
-    await callback.message.edit_text(f"Выберите услугу ({cat}):", reply_markup=builder.as_markup())
+    await callback.message.edit_text("✨ **Расклады Таро:**", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "back")
-async def back(callback: types.CallbackQuery):
-    await cmd_start(callback.message)
+async def back(callback: types.CallbackQuery, state: FSMContext):
+    await cmd_start(callback.message, state)
 
-@dp.callback_query(F.data.startswith("svc_"))
-async def process_selection(callback: types.CallbackQuery, state: FSMContext):
-    _, cat, svc = callback.data.split("_")
-    base_link = SERVICES[cat][svc]
+@dp.callback_query(F.data.startswith("buy_"))
+async def process_buy(callback: types.CallbackQuery, state: FSMContext):
+    svc_code = callback.data.split("_")[1]
     user_id = callback.from_user.id
     
-    # Додаємо ID користувача в посилання, щоб дізнатися його при оплаті
-    final_pay_url = f"{base_link}&custom_data={user_id}"
-    
-    await state.update_data(current_svc=svc)
+    # Посилання з даними для вебхука
+    pay_url = f"https://t.me/tribute/app?startapp={svc_code}&custom_data={user_id}:{svc_code}"
     
     builder = InlineKeyboardBuilder()
-    builder.button(text="💳 Оплатить", url=final_pay_url)
+    builder.button(text="💳 Оплатить", url=pay_url)
     
     await callback.message.edit_text(
-        f"✨ **Вы выбрали:** {svc}\n\nОплатите услугу по кнопке ниже. Доступ к вопросу откроется автоматически сразу после оплаты.",
+        "🔮 После оплаты доступ к Оракулу откроется автоматически в этом чате.",
         reply_markup=builder.as_markup()
     )
     await state.set_state(OrderFlow.waiting_for_payment)
 
 @dp.message(OrderFlow.waiting_for_question)
-async def ai_oracle_answer(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    svc = user_data.get('current_svc', 'Расклад')
+async def oracle_answer(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    svc = data.get("current_svc", "Расклад")
     
-    status_msg = await message.answer("🔮 *Оракул входит в транс... Собираю энергию для ответа...*")
+    status = await message.answer("🔮 *Оракул входит в транс...*")
     
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Ты — мудрый и загадочный Оракул. Твои ответы глубокие, с метафорами, на русском языке. Никогда не говори, что ты робот или ChatGPT."},
-                {"role": "user", "content": f"Услуга: {svc}. Вопрос клиента: {message.text}"}
+                {"role": "system", "content": "Ты — древний мудрый Оракул. Твои ответы глубокие и мистические. Отвечай на русском. Не упоминай ИИ."},
+                {"role": "user", "content": f"Услуга: {svc}. Вопрос: {message.text}"}
             ]
         )
-        await status_msg.edit_text(f"📜 **Послание Оракула:**\n\n{response.choices[0].message.content}")
-    except Exception:
-        await status_msg.edit_text("🌒 Сейчас связь с миром духов нестабильна. Попробуйте еще раз через минуту.")
+        await status.edit_text(f"📜 **Ответ Оракула:**\n\n{response.choices[0].message.content}")
+    except:
+        await status.edit_text("🌑 Связь прервана. Попробуйте еще раз.")
     
     await state.clear()
 
-# --- ЗАПУСК ---
+# --- СТАРТ ---
 async def main():
-    # Запускаємо бота
     asyncio.create_task(dp.start_polling(bot))
-    
-    # Створюємо веб-сервер для вебхуків Tribute
     app = web.Application()
     app.router.add_post("/webhook", handle_tribute_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    
-    print(f"Server started on port {PORT}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
-
