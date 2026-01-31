@@ -10,25 +10,29 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 import google.generativeai as genai
 
-# --- НАСТРОЙКИ ---
+# --- НАЛАШТУВАННЯ ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 TRIBUTE_SECRET = os.getenv("TRIBUTE_SECRET")
 PORT = int(os.getenv("PORT", 8080))
 
-# Настройка Gemini
+# Налаштування Gemini
 genai.configure(api_key=GEMINI_KEY)
 
-# Автоматический подбор доступной модели
-def get_model():
+# ФУНКЦІЯ АВТОМАТИЧНОГО ВИБОРУ МОДЕЛІ
+def find_working_model():
+    print("🔍 Пошук доступних моделей...")
     try:
-        # Пытаемся взять классический Pro (самый стабильный)
-        return genai.GenerativeModel('gemini-pro')
-    except:
-        # Если не вышло, берем Flash
-        return genai.GenerativeModel('gemini-1.5-flash')
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                print(f"✅ Знайдено робочу модель: {m.name}")
+                return m.name
+    except Exception as e:
+        print(f"❌ Не вдалося отримати список моделей: {e}")
+    return 'models/gemini-1.5-flash' # Запасний варіант
 
-model = get_model()
+WORKING_MODEL_NAME = find_working_model()
+model = genai.GenerativeModel(WORKING_MODEL_NAME)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -57,24 +61,24 @@ async def handle_tribute_webhook(request):
             user_state = dp.fsm.resolve_context(bot, user_id, user_id)
             await user_state.update_data(current_svc=SERVICES_MAP.get(svc_code, "Расклад"))
             await user_state.set_state(OrderFlow.waiting_for_question)
-            await bot.send_message(user_id, "✅ Оплата принята! Оракул готов. Введите вопрос:")
+            await bot.send_message(user_id, "✅ Оплата принята! Оракул слушает вопрос:")
         return web.Response(text="ok")
     except: return web.Response(status=500)
 
-# --- ЛОГИКА БОТА ---
+# --- ЛОГІКА БОТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="🎁 Проверить бесплатно", callback_data="test_me")
     builder.button(text="🃏 Платные расклады", callback_data="cat_taro")
     builder.adjust(1)
-    await message.answer("🔮 Оракул на связи.", reply_markup=builder.as_markup())
+    await message.answer("🔮 Оракул на связи. Модель активирована.", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "test_me")
 async def test_me(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(current_svc="Бесплатный тест")
     await state.set_state(OrderFlow.waiting_for_question)
-    await callback.message.edit_text("✨ Задайте свой вопрос Оракулу бесплатно:")
+    await callback.message.edit_text("✨ Задайте свой вопрос Оракулу:")
 
 @dp.callback_query(F.data == "cat_taro")
 async def cat_taro(callback: types.CallbackQuery):
@@ -84,17 +88,13 @@ async def cat_taro(callback: types.CallbackQuery):
     builder.adjust(1)
     await callback.message.edit_text("🔮 Выберите расклад:", reply_markup=builder.as_markup())
 
-@dp.callback_query(F.data == "back")
-async def back(callback: types.CallbackQuery, state: FSMContext):
-    await cmd_start(callback.message, state)
-
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     svc_code = callback.data.split("_")[1]
     pay_url = f"https://t.me/tribute/app?startapp={svc_code}&custom_data={callback.from_user.id}:{svc_code}"
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Оплатить", url=pay_url)
-    await callback.message.edit_text("✨ После оплаты я отвечу на ваш вопрос.", reply_markup=builder.as_markup())
+    await callback.message.edit_text("✨ Оплатите, и я сразу отвечу.", reply_markup=builder.as_markup())
     await state.set_state(OrderFlow.waiting_for_payment)
 
 @dp.message(OrderFlow.waiting_for_question)
@@ -103,9 +103,8 @@ async def oracle_answer(message: types.Message, state: FSMContext):
     status = await message.answer("🔮 *Оракул входит в транс...*")
     try:
         prompt = f"Ты — мистический Оракул. Отвечай на русском. Услуга: {data.get('current_svc')}. Вопрос: {message.text}"
-        # Вызов модели
         response = model.generate_content(prompt)
-        await status.edit_text(f"📜 **Послание:**\n\n{response.text}")
+        await status.edit_text(f"📜 **Ответ:**\n\n{response.text}")
     except Exception as e:
         await status.edit_text(f"🌑 Ошибка: {str(e)}")
     await state.clear()
