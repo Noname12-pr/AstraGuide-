@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 from openai import AsyncOpenAI
 
-# Читання налаштувань з Railway
+# Налаштування з Railway
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 TRIBUTE_SECRET = os.getenv("TRIBUTE_SECRET")
@@ -24,24 +24,24 @@ class OrderFlow(StatesGroup):
     waiting_for_payment = State()
     waiting_for_question = State()
 
-# Словник послуг (Код з Tribute : Назва для Оракула)
+# Словник усіх послуг
 SERVICES_MAP = {
     "pqgo": "Таро — 3 карты",
     "pqgq": "Таро — 5 карт",
     "pqgr": "Таро — 8 карт",
-    "pqgu": "Таро — отношения",
-    "pqgw": "Оракул — ответ",
-    "pqgD": "Ответ Да / Нет"
+    "pqgu": "Таро — расклад на отношения",
+    "pqgw": "Оракул — краткий ответ",
+    "pqgD": "Ответ Да / Нет",
+    "free_test": "Бесплатная проверка"
 }
 
-# --- ОБРОБНИК ВЕБХУКА (АВТОМАТИЧНА ОПЛАТА) ---
+# --- ВЕБХУК ДЛЯ АВТО-ОПЛАТИ ---
 async def handle_tribute_webhook(request):
     try:
         signature = request.headers.get("X-Tribute-Signature")
         body = await request.read()
-        
-        # Перевірка безпеки
         hash_check = hmac.new(TRIBUTE_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        
         if hash_check != signature:
             return web.Response(status=403)
 
@@ -56,39 +56,43 @@ async def handle_tribute_webhook(request):
                 await user_state.update_data(current_svc=SERVICES_MAP.get(svc_code, "Расклад"))
                 await user_state.set_state(OrderFlow.waiting_for_question)
                 
-                await bot.send_message(
-                    user_id, 
-                    "✅ **Оплата подтверждена!**\n\nОракул готов. Пожалуйста, введите ваш вопрос:"
-                )
+                await bot.send_message(user_id, "✅ **Оплата подтверждена!**\nОракул готов. Введите ваш вопрос:")
         return web.Response(text="ok")
-    except Exception:
+    except:
         return web.Response(status=500)
 
 # --- ЛОГІКА БОТА ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    # Перевірка, чи не повернувся юзер після оплати
     current_state = await state.get_state()
     if current_state == OrderFlow.waiting_for_question:
-        await message.answer("🔮 С возвращением! Оплата получена. Напишите ваш вопрос:")
+        await message.answer("🔮 Оракул на связи. Жду ваш вопрос:")
         return
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="🃏 ТАРО", callback_data="cat_taro")
-    builder.button(text="🔮 ОРАКУЛ", callback_data="cat_ora")
+    # БЕЗКОШТОВНА КНОПКА ДЛЯ ПЕРЕВІРКИ
+    builder.button(text="🎁 Проверить Оракула (Бесплатно)", callback_data="free_test")
+    builder.button(text="🃏 ТАРО (Платные расклады)", callback_data="cat_taro")
     builder.adjust(1)
-    await message.answer("🔮 **Добро пожаловать к Оракулу.**\nВыберите категорию:", reply_markup=builder.as_markup())
+    await message.answer("🔮 **Добро пожаловать к Оракулу.**\n\nВы можете проверить мои силы бесплатно или выбрать глубокий расклад:", reply_markup=builder.as_markup())
 
+# Обробка безкоштовної перевірки
+@dp.callback_query(F.data == "free_test")
+async def free_test(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(current_svc="Бесплатная проверка (Таро 3 карты)")
+    await state.set_state(OrderFlow.waiting_for_question)
+    await callback.message.edit_text("✨ **Тестовый режим активирован.**\n\nЗадайте свой вопрос Оракулу (бесплатно):")
+
+# Обробка вибору платної категорії Таро
 @dp.callback_query(F.data == "cat_taro")
 async def cat_taro(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
-    # Приклад кнопок (заміни коди на свої)
     builder.button(text="3 карты (500 ₽)", callback_data="buy_pqgo")
     builder.button(text="8 карт (1000 ₽)", callback_data="buy_pqgr")
     builder.button(text="⬅️ Назад", callback_data="back")
     builder.adjust(1)
-    await callback.message.edit_text("✨ **Расклады Таро:**", reply_markup=builder.as_markup())
+    await callback.message.edit_text("🔮 **Выберите платный расклад:**", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "back")
 async def back(callback: types.CallbackQuery, state: FSMContext):
@@ -98,19 +102,14 @@ async def back(callback: types.CallbackQuery, state: FSMContext):
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     svc_code = callback.data.split("_")[1]
     user_id = callback.from_user.id
-    
-    # Посилання з даними для вебхука
     pay_url = f"https://t.me/tribute/app?startapp={svc_code}&custom_data={user_id}:{svc_code}"
     
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Оплатить", url=pay_url)
-    
-    await callback.message.edit_text(
-        "🔮 После оплаты доступ к Оракулу откроется автоматически в этом чате.",
-        reply_markup=builder.as_markup()
-    )
+    await callback.message.edit_text("✨ После оплаты Оракул сразу примет ваш вопрос.", reply_markup=builder.as_markup())
     await state.set_state(OrderFlow.waiting_for_payment)
 
+# ВІДПОВІДЬ CHATGPT (ОРАКУЛА)
 @dp.message(OrderFlow.waiting_for_question)
 async def oracle_answer(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -122,17 +121,17 @@ async def oracle_answer(message: types.Message, state: FSMContext):
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Ты — древний мудрый Оракул. Твои ответы глубокие и мистические. Отвечай на русском. Не упоминай ИИ."},
-                {"role": "user", "content": f"Услуга: {svc}. Вопрос: {message.text}"}
+                {"role": "system", "content": "Ты — древний мудрый Оракул. Твои ответы глубокие, мистические и загадочные. Не упоминай, что ты ИИ. Отвечай на русском."},
+                {"role": "user", "content": f"Услуга: {svc}. Вопрос клиента: {message.text}"}
             ]
         )
-        await status.edit_text(f"📜 **Ответ Оракула:**\n\n{response.choices[0].message.content}")
-    except:
-        await status.edit_text("🌑 Связь прервана. Попробуйте еще раз.")
+        await status.edit_text(f"📜 **Послание Оракула:**\n\n{response.choices[0].message.content}")
+    except Exception as e:
+        await status.edit_text("🌑 Связь с миром духов прервана. Попробуйте еще раз.")
     
     await state.clear()
 
-# --- СТАРТ ---
+# ЗАПУСК
 async def main():
     asyncio.create_task(dp.start_polling(bot))
     app = web.Application()
