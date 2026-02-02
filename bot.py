@@ -9,6 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 import google.generativeai as genai
+from google.generativeai.types import SafetySettingDict, HarmCategory, HarmBlockThreshold
 
 # --- НАЛАШТУВАННЯ ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -19,20 +20,24 @@ PORT = int(os.getenv("PORT", 8080))
 # Налаштування Gemini
 genai.configure(api_key=GEMINI_KEY)
 
-# ФУНКЦІЯ АВТОМАТИЧНОГО ВИБОРУ МОДЕЛІ
+# Вимикаємо фільтри безпеки, щоб Оракул міг відповідати на все
+safety_settings = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
 def find_working_model():
-    print("🔍 Пошук доступних моделей...")
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                print(f"✅ Знайдено робочу модель: {m.name}")
                 return m.name
-    except Exception as e:
-        print(f"❌ Не вдалося отримати список моделей: {e}")
-    return 'models/gemini-1.5-flash' # Запасний варіант
+    except: pass
+    return 'models/gemini-1.5-flash'
 
 WORKING_MODEL_NAME = find_working_model()
-model = genai.GenerativeModel(WORKING_MODEL_NAME)
+model = genai.GenerativeModel(model_name=WORKING_MODEL_NAME, safety_settings=safety_settings)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -53,32 +58,33 @@ async def handle_tribute_webhook(request):
         body = await request.read()
         hash_check = hmac.new(TRIBUTE_SECRET.encode(), body, hashlib.sha256).hexdigest()
         if hash_check != signature: return web.Response(status=403)
-
         data = await request.json()
         if data.get("status") == "completed":
-            user_id, svc_code = data.get("custom_data", "").split(":")
-            user_id = int(user_id)
+            payload = data.get("custom_data", "").split(":")
+            user_id = int(payload[0])
+            svc_code = payload[1]
             user_state = dp.fsm.resolve_context(bot, user_id, user_id)
             await user_state.update_data(current_svc=SERVICES_MAP.get(svc_code, "Расклад"))
             await user_state.set_state(OrderFlow.waiting_for_question)
-            await bot.send_message(user_id, "✅ Оплата принята! Оракул слушает вопрос:")
+            await bot.send_message(user_id, "✅ **Оплата принята!**\n\nВведите ваш вопрос Оракулу:")
         return web.Response(text="ok")
     except: return web.Response(status=500)
 
 # --- ЛОГІКА БОТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
     builder = InlineKeyboardBuilder()
-    builder.button(text="🎁 Проверить бесплатно", callback_data="test_me")
+    builder.button(text="🎁 Бесплатный вопрос", callback_data="test_me")
     builder.button(text="🃏 Платные расклады", callback_data="cat_taro")
     builder.adjust(1)
-    await message.answer("🔮 Оракул на связи. Модель активирована.", reply_markup=builder.as_markup())
+    await message.answer("🔮 **Оракул пробудился.**\nЗадайте свой вопрос:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "test_me")
 async def test_me(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(current_svc="Бесплатный тест")
     await state.set_state(OrderFlow.waiting_for_question)
-    await callback.message.edit_text("✨ Задайте свой вопрос Оракулу:")
+    await callback.message.edit_text("✨ **Я слушаю ваш вопрос.**\nНапишите его текстом:")
 
 @dp.callback_query(F.data == "cat_taro")
 async def cat_taro(callback: types.CallbackQuery):
@@ -86,7 +92,11 @@ async def cat_taro(callback: types.CallbackQuery):
     builder.button(text="3 карты (500 ₽)", callback_data="pay_pqgo")
     builder.button(text="⬅️ Назад", callback_data="back")
     builder.adjust(1)
-    await callback.message.edit_text("🔮 Выберите расклад:", reply_markup=builder.as_markup())
+    await callback.message.edit_text("🔮 **Выберите расклад:**", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "back")
+async def back(callback: types.CallbackQuery, state: FSMContext):
+    await cmd_start(callback.message, state)
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
@@ -94,19 +104,27 @@ async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     pay_url = f"https://t.me/tribute/app?startapp={svc_code}&custom_data={callback.from_user.id}:{svc_code}"
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Оплатить", url=pay_url)
-    await callback.message.edit_text("✨ Оплатите, и я сразу отвечу.", reply_markup=builder.as_markup())
+    await callback.message.edit_text("✨ После оплаты я сразу отвечу.", reply_markup=builder.as_markup())
     await state.set_state(OrderFlow.waiting_for_payment)
 
+# --- ВІДПОВІДЬ ОРАКУЛА З ПОВТОРОМ ---
 @dp.message(OrderFlow.waiting_for_question)
 async def oracle_answer(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    status = await message.answer("🔮 *Оракул входит в транс...*")
-    try:
-        prompt = f"Ты — мистический Оракул. Отвечай на русском. Услуга: {data.get('current_svc')}. Вопрос: {message.text}"
-        response = model.generate_content(prompt)
-        await status.edit_text(f"📜 **Ответ:**\n\n{response.text}")
-    except Exception as e:
-        await status.edit_text(f"🌑 Ошибка: {str(e)}")
+    svc = data.get("current_svc", "Расклад")
+    status_msg = await message.answer("🔮 *Оракул входит в транс...*")
+    
+    for attempt in range(2): # 2 спроби
+        try:
+            prompt = f"Ты — мистический Оракул. Отвечай глубоко на русском. Услуга: {svc}. Вопрос: {message.text}"
+            response = model.generate_content(prompt)
+            if response and response.text:
+                await status_msg.edit_text(f"📜 **Ответ:**\n\n{response.text}")
+                await state.clear()
+                return
+        except Exception:
+            if attempt == 0: await asyncio.sleep(2)
+            else: await status_msg.edit_text("🌑 Связь прервана. Попробуйте еще раз.")
     await state.clear()
 
 async def main():
