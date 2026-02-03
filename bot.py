@@ -20,25 +20,23 @@ PORT = int(os.getenv("PORT", 8080))
 # Конфігурація Google AI
 genai.configure(api_key=GEMINI_KEY)
 
-# Налаштування безпеки (вимкнення фільтрів)
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-]
+# АВТОМАТИЧНИЙ ПІДБІР РОБОЧОЇ МОДЕЛІ
+def get_active_model():
+    print("🔍 Пошук доступної моделі...")
+    try:
+        # Отримуємо список усіх моделей, доступних для вашого ключа
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # Шукаємо Flash 1.5 або Pro
+                if 'gemini-1.5-flash' in m.name or 'gemini-pro' in m.name:
+                    print(f"✅ Обрано модель: {m.name}")
+                    return genai.GenerativeModel(m.name)
+    except Exception as e:
+        print(f"❌ Помилка при списку моделей: {e}")
+    # Якщо автоматика не спрацювала, пробуємо стандартний шлях
+    return genai.GenerativeModel('gemini-1.5-flash')
 
-# Створення моделі з повним шляхом (виправлення помилки 404)
-try:
-    model = genai.GenerativeModel(
-        model_name='models/gemini-1.5-flash',
-        safety_settings=safety_settings
-    )
-except:
-    model = genai.GenerativeModel(
-        model_name='models/gemini-pro',
-        safety_settings=safety_settings
-    )
+oracle_model = get_active_model()
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -53,24 +51,17 @@ async def handle_tribute_webhook(request):
         signature = request.headers.get("X-Tribute-Signature")
         body = await request.read()
         hash_check = hmac.new(TRIBUTE_SECRET.encode(), body, hashlib.sha256).hexdigest()
-        
-        if hash_check != signature:
-            return web.Response(status=403)
-
+        if hash_check != signature: return web.Response(status=403)
         data = await request.json()
         if data.get("status") == "completed":
-            custom_data = data.get("custom_data", "")
-            if ":" in custom_data:
-                user_id_str, svc_code = custom_data.split(":")
-                user_id = int(user_id_str)
-                state = dp.fsm.resolve_context(bot, user_id, user_id)
-                await state.update_data(current_svc="Оплаченный расклад")
-                await state.set_state(OrderFlow.waiting_for_question)
-                await bot.send_message(user_id, "✅ **Оплата принята!**\n\nЯ готов ответить. Задайте свой вопрос:")
+            custom_data = data.get("custom_data", "").split(":")
+            user_id = int(custom_data[0])
+            state = dp.fsm.resolve_context(bot, user_id, user_id)
+            await state.update_data(current_svc="Оплаченный расклад")
+            await state.set_state(OrderFlow.waiting_for_question)
+            await bot.send_message(user_id, "✅ **Оплата принята!**\n\nВведите ваш вопрос:")
         return web.Response(text="ok")
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return web.Response(status=500)
+    except: return web.Response(status=500)
 
 # --- КОМАНДИ ---
 @dp.message(Command("start"))
@@ -86,13 +77,13 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def cmd_unlock(message: types.Message, state: FSMContext):
     await state.update_data(current_svc="Тестовый доступ")
     await state.set_state(OrderFlow.waiting_for_question)
-    await message.answer("🔑 **Доступ открыт.** Вводи свой вопрос:")
+    await message.answer("🔑 **Доступ открыт.** Задавайте вопрос:")
 
 @dp.callback_query(F.data == "test_me")
 async def test_me(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(current_svc="Бесплатный тест")
     await state.set_state(OrderFlow.waiting_for_question)
-    await callback.message.edit_text("✨ **Я слушаю.** Задай свой вопрос:")
+    await callback.message.edit_text("✨ **Я слушаю.** Напишите ваш вопрос:")
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_pay(callback: types.CallbackQuery, state: FSMContext):
@@ -100,39 +91,25 @@ async def process_pay(callback: types.CallbackQuery, state: FSMContext):
     pay_url = f"https://t.me/tribute/app?startapp={svc_code}&custom_data={callback.from_user.id}:{svc_code}"
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Оплатить", url=pay_url)
-    await callback.message.edit_text("🔮 После оплаты я сразу отвечу на ваш вопрос.", reply_markup=builder.as_markup())
+    await callback.message.edit_text("🔮 Оплатите, и я сразу отвечу.", reply_markup=builder.as_markup())
 
-# --- ВІДПОВІДЬ ОРАКУЛА ---
+# --- ВІДПОВІДЬ ШІ ---
 @dp.message(OrderFlow.waiting_for_question)
 async def oracle_answer(message: types.Message, state: FSMContext):
-    data = await state.get_data()
     status = await message.answer("🔮 *Оракул входит в транс...*")
-    
     try:
-        prompt = f"Ты мистический Оракул. Отвечай на русском. Вопрос: {message.text}"
-        
-        # Генерація контенту
-        response = model.generate_content(prompt)
-        
-        if response and response.text:
-            await status.edit_text(f"📜 **Ответ Оракула:**\n\n{response.text}")
-        else:
-            await status.edit_text("🌑 Духи молчат. Попробуйте еще раз.")
+        response = oracle_model.generate_content(f"Ты мистический Оракул. Отвечай на русском. Вопрос: {message.text}")
+        await status.edit_text(f"📜 **Ответ:**\n\n{response.text}")
     except Exception as e:
-        # Якщо 404 все ще виникає, виводимо зрозумілу помилку
-        await status.edit_text(f"🌑 Ошибка: {str(e)}")
-    
+        await status.edit_text(f"🌑 Ошибка: {str(e)[:100]}")
     await state.clear()
 
 async def main():
-    # Webhook для Tribute
-    app = web.Application()
-    app.router.add_post("/webhook", handle_tribute_webhook)
-    runner = web.AppRunner(app)
-    await runner.setup()
+    # Запуск сервера для вебхуків
+    app = web.Application(); app.router.add_post("/webhook", handle_tribute_webhook)
+    runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    
-    # Polling для Telegram
+    # Запуск бота
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
