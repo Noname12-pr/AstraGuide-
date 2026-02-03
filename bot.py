@@ -17,15 +17,33 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 TRIBUTE_SECRET = os.getenv("TRIBUTE_SECRET")
 PORT = int(os.getenv("PORT", 8080))
 
+# Налаштування Gemini з виправленням для 404
 genai.configure(api_key=GEMINI_KEY)
+
+# Використовуємо простішу назву моделі без v1beta префіксів
 model = genai.GenerativeModel('gemini-1.5-flash')
+
+# Додаємо фільтри безпеки (щоб Оракул не мовчав)
+safety_settings = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+# Створюємо модель з налаштуваннями
+oracle_model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash',
+    safety_settings=safety_settings
+)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-class OrderFlow(StatesGroup):
-    waiting_for_payment = State()
-    waiting_for_question = State()
+# ... далі йде весь інший код (стани, вебхук, команди) ...
+
+# У функції відповіді (oracle_answer) заміни рядок генерації на:
+# response = oracle_model.generate_content(prompt)
 
 # --- ОБРОБКА WEBHOOK ВІД TRIBUTE ---
 async def handle_tribute_webhook(request):
@@ -115,3 +133,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
