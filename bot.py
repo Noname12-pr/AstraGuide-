@@ -20,23 +20,16 @@ PORT = int(os.getenv("PORT", 8080))
 # Конфігурація Google AI
 genai.configure(api_key=GEMINI_KEY)
 
-# АВТОМАТИЧНИЙ ПІДБІР РОБОЧОЇ МОДЕЛІ
-def get_active_model():
-    print("🔍 Пошук доступної моделі...")
-    try:
-        # Отримуємо список усіх моделей, доступних для вашого ключа
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # Шукаємо Flash 1.5 або Pro
-                if 'gemini-1.5-flash' in m.name or 'gemini-pro' in m.name:
-                    print(f"✅ Обрано модель: {m.name}")
-                    return genai.GenerativeModel(m.name)
-    except Exception as e:
-        print(f"❌ Помилка при списку моделей: {e}")
-    # Якщо автоматика не спрацювала, пробуємо стандартний шлях
-    return genai.GenerativeModel('gemini-1.5-flash')
-
-oracle_model = get_active_model()
+# Використовуємо 8b модель - вона легша і часто має вільніші ліміти
+model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash-8b',
+    safety_settings=[
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -57,7 +50,7 @@ async def handle_tribute_webhook(request):
             custom_data = data.get("custom_data", "").split(":")
             user_id = int(custom_data[0])
             state = dp.fsm.resolve_context(bot, user_id, user_id)
-            await state.update_data(current_svc="Оплаченный расклад")
+            await state.update_data(current_svc="Расклад")
             await state.set_state(OrderFlow.waiting_for_question)
             await bot.send_message(user_id, "✅ **Оплата принята!**\n\nВведите ваш вопрос:")
         return web.Response(text="ok")
@@ -71,19 +64,19 @@ async def cmd_start(message: types.Message, state: FSMContext):
     builder.button(text="🎁 Бесплатный вопрос", callback_data="test_me")
     builder.button(text="🃏 Таро — 3 карты", callback_data="pay_pqoQ")
     builder.adjust(1)
-    await message.answer("🔮 **Оракул на связи.**\nВыберите услугу:", reply_markup=builder.as_markup())
+    await message.answer("🔮 **Оракул готов.** Выберите путь:", reply_markup=builder.as_markup())
 
 @dp.message(Command("unlock"))
 async def cmd_unlock(message: types.Message, state: FSMContext):
-    await state.update_data(current_svc="Тестовый доступ")
+    await state.update_data(current_svc="Тест")
     await state.set_state(OrderFlow.waiting_for_question)
-    await message.answer("🔑 **Доступ открыт.** Задавайте вопрос:")
+    await message.answer("🔑 **Доступ открыт.** Жду твой вопрос:")
 
 @dp.callback_query(F.data == "test_me")
 async def test_me(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(current_svc="Бесплатный тест")
+    await state.update_data(current_svc="Тест")
     await state.set_state(OrderFlow.waiting_for_question)
-    await callback.message.edit_text("✨ **Я слушаю.** Напишите ваш вопрос:")
+    await callback.message.edit_text("✨ **Я слушаю.** Задай вопрос:")
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def process_pay(callback: types.CallbackQuery, state: FSMContext):
@@ -93,23 +86,22 @@ async def process_pay(callback: types.CallbackQuery, state: FSMContext):
     builder.button(text="💳 Оплатить", url=pay_url)
     await callback.message.edit_text("🔮 Оплатите, и я сразу отвечу.", reply_markup=builder.as_markup())
 
-# --- ВІДПОВІДЬ ШІ ---
+# --- ВІДПОВІДЬ ---
 @dp.message(OrderFlow.waiting_for_question)
 async def oracle_answer(message: types.Message, state: FSMContext):
     status = await message.answer("🔮 *Оракул входит в транс...*")
     try:
-        response = oracle_model.generate_content(f"Ты мистический Оракул. Отвечай на русском. Вопрос: {message.text}")
+        # Прямий виклик генерації
+        response = model.generate_content(f"Ты мистический Оракул. Отвечай на русском. Вопрос: {message.text}")
         await status.edit_text(f"📜 **Ответ:**\n\n{response.text}")
     except Exception as e:
-        await status.edit_text(f"🌑 Ошибка: {str(e)[:100]}")
+        await status.edit_text(f"🌑 Ошибка: {str(e)}")
     await state.clear()
 
 async def main():
-    # Запуск сервера для вебхуків
     app = web.Application(); app.router.add_post("/webhook", handle_tribute_webhook)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    # Запуск бота
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
